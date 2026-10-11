@@ -1630,6 +1630,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSGestureR
     }
     
     private func getCurrentActiveScreen() -> NSScreen? {
+        // A saved display lets a multi-monitor setup open the launcher without
+        // covering the user's working screen. Disconnected displays fall back
+        // to the normal pointer-based selection.
+        if let preferredID = UserDefaults.standard.string(forKey: "preferredDisplayID"),
+           let screen = NSScreen.screens.first(where: { AppStore.screenIdentifier(for: $0) == preferredID }) {
+            return screen
+        }
         let mouse = NSEvent.mouseLocation
         return NSScreen.screens.first { $0.frame.contains(mouse) }
     }
