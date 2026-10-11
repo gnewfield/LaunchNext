@@ -3733,22 +3733,10 @@ final class AppStore: ObservableObject {
                     var localFound: [AppInfo] = []
                     var localSeenPaths = Set<String>()
 
-                    guard let enumerator = FileManager.default.enumerator(
-                        at: url,
-                        includingPropertiesForKeys: [.isDirectoryKey],
-                        options: [.skipsHiddenFiles, .skipsPackageDescendants],
-                        errorHandler: { _, _ in
-                            localScanFailed = true
-                            return false
-                        }
-                    ) else {
-                        lock.withLock {
-                            scanFailed = true
-                        }
-                        return
-                    }
+                    let scan = ApplicationDirectoryScanner.scan(url)
+                    localScanFailed = !scan.isComplete
 
-                    for case let item as URL in enumerator {
+                    for item in scan.appURLs {
                         let resolved = item.resolvingSymlinksInPath()
                         guard resolved.pathExtension == "app",
                               self.isValidApp(at: resolved),
@@ -3771,29 +3759,16 @@ final class AppStore: ObservableObject {
                             if !sourceStillAvailable && normalizedCustomSourceSet.contains(path) {
                                 sourceBecameUnavailable = true
                             }
-                        } else {
-                            // Only complete source results are allowed into the
-                            // aggregate. Partial enumeration must never authorize
-                            // removals from the persisted layout.
-                            found.append(contentsOf: localFound)
-                            seenPaths.formUnion(localSeenPaths)
                         }
+                        // Partial results can add apps, but cannot authorize removals.
+                        found.append(contentsOf: localFound)
+                        seenPaths.formUnion(localSeenPaths)
                     }
                 }
             }
             
             group.wait()
 
-            guard !scanFailed else {
-                DispatchQueue.main.async {
-                    self.finishApplicationReconciliation(reasons: reasons, succeeded: false)
-                    if sourceBecameUnavailable {
-                        self.requestApplicationReconciliation(reason: .sourceChange)
-                    }
-                }
-                return
-            }
-            
             // 去重和排序 - 使用更安全的方法
             var uniqueApps: [AppInfo] = []
             var uniqueSeenPaths = Set<String>()
@@ -3824,12 +3799,16 @@ final class AppStore: ObservableObject {
                 let didApplyChanges = self.processScannedApplications(
                     newApps,
                     unavailableCustomSources: unavailableCustomSources,
-                    reasons: reasons
+                    reasons: reasons,
+                    preserveExistingApps: scanFailed
                 )
                 if didApplyChanges {
                     self.generateCacheAfterScan()
                 }
-                self.finishApplicationReconciliation(reasons: reasons, succeeded: true)
+                self.finishApplicationReconciliation(reasons: reasons, succeeded: !scanFailed)
+                if sourceBecameUnavailable {
+                    self.requestApplicationReconciliation(reason: .sourceChange)
+                }
             }
         }
     }
@@ -3845,7 +3824,8 @@ final class AppStore: ObservableObject {
     private func processScannedApplications(
         _ newApps: [AppInfo],
         unavailableCustomSources: [String],
-        reasons: Set<ApplicationReconciliationReason>
+        reasons: Set<ApplicationReconciliationReason>,
+        preserveExistingApps: Bool
     ) -> Bool {
         // 保存当前 items 的顺序和结构
         let currentItems = self.items
@@ -3879,7 +3859,7 @@ final class AppStore: ObservableObject {
         for app in self.apps {
             if let refreshed = freshMap[app.url.path] {
                 updatedApps.append(refreshed)
-            } else if isUnderUnavailableCustomSource(app.url.path) {
+            } else if preserveExistingApps || isUnderUnavailableCustomSource(app.url.path) {
                 updatedApps.append(app)
             }
         }
@@ -3891,7 +3871,7 @@ final class AppStore: ObservableObject {
                 if let refreshed = freshMap[app.url.path] {
                     return refreshed
                 }
-                return isUnderUnavailableCustomSource(app.url.path) ? app : nil
+                return preserveExistingApps || isUnderUnavailableCustomSource(app.url.path) ? app : nil
             }
             return folderWithValidQuickLaunchPins(updatedFolder)
         }
